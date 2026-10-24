@@ -12,14 +12,14 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') });
 const ADMIN = { email: 'nice@n.com', password: '!Nice7070', full_name: 'Admin User' };
 
 const CUSTOMERS: { full_name: string; email: string; account_number: string }[] = [
-  { full_name: 'Sarah Mitchell', email: 'sarah.mitchell@demo.trustgeorgiabank.com', account_number: '5915773142' },
-  { full_name: 'James Okafor', email: 'james.okafor@demo.trustgeorgiabank.com', account_number: '9025350109' },
-  { full_name: 'Priya Chandran', email: 'priya.chandran@demo.trustgeorgiabank.com', account_number: '3543118405' },
-  { full_name: 'Michael Torres', email: 'michael.torres@demo.trustgeorgiabank.com', account_number: '5158624372' },
-  { full_name: 'Emily Zhang', email: 'emily.zhang@demo.trustgeorgiabank.com', account_number: '1226488111' },
-  { full_name: 'David Osei', email: 'david.osei@demo.trustgeorgiabank.com', account_number: '6589653777' },
-  { full_name: 'Laura Bianchi', email: 'laura.bianchi@demo.trustgeorgiabank.com', account_number: '3745841567' },
-  { full_name: 'Daniel Kim', email: 'daniel.kim@demo.trustgeorgiabank.com', account_number: '5019482936' },
+  { full_name: 'Sarah Mitchell', email: 'sarah.mitchell@demo.sterlingcrestcapital.com', account_number: '5915773142' },
+  { full_name: 'James Okafor', email: 'james.okafor@demo.sterlingcrestcapital.com', account_number: '9025350109' },
+  { full_name: 'Priya Chandran', email: 'priya.chandran@demo.sterlingcrestcapital.com', account_number: '3543118405' },
+  { full_name: 'Michael Torres', email: 'michael.torres@demo.sterlingcrestcapital.com', account_number: '5158624372' },
+  { full_name: 'Emily Zhang', email: 'emily.zhang@demo.sterlingcrestcapital.com', account_number: '1226488111' },
+  { full_name: 'David Osei', email: 'david.osei@demo.sterlingcrestcapital.com', account_number: '6589653777' },
+  { full_name: 'Laura Bianchi', email: 'laura.bianchi@demo.sterlingcrestcapital.com', account_number: '3745841567' },
+  { full_name: 'Daniel Kim', email: 'daniel.kim@demo.sterlingcrestcapital.com', account_number: '5019482936' },
 ];
 
 const run = async (): Promise<void> => {

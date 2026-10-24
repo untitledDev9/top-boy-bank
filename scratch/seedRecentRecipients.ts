@@ -31,7 +31,7 @@ const run = async (): Promise<void> => {
     const results: { name: string; email: string; account_number: string }[] = [];
 
     for (const full_name of NAMES) {
-      const email = `${slugify(full_name)}@demo.trustgeorgiabank.com`;
+      const email = `${slugify(full_name)}@demo.sterlingcrestcapital.com`;
       let user = await User.findOne({ email });
       if (!user) {
         user = await User.create({

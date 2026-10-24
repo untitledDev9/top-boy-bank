@@ -16,7 +16,7 @@ const sendEmail = async (options: EmailOptions): Promise<void> => {
   });
 
   const message = {
-    from: process.env.EMAIL_FROM || '"Sterling Crest Capital" <noreply@trustgeorgiabank.com>',
+    from: process.env.EMAIL_FROM || '"Sterling Crest Capital" <noreply@sterlingcrestcapital.com>',
     to: options.email,
     subject: options.subject,
     text: options.message,

@@ -32,7 +32,7 @@ Platform Features & How They Work:
 6. ACCOUNT ACCESS: An account can be blocked from withdrawing/transferring in two independent ways: (a) the account is not yet verified, or (b) an administrator has placed a specific restriction on it (e.g. system maintenance, a device/2FA check, or a compliance review). If a customer says they're blocked from withdrawing or transferring, do NOT guess why — tell them to contact support so an agent can look at the specific reason on their account.
 
 Support:
-- Email: support@trustgeorgiabank.com
+- Email: support@sterlingcrestcapital.com
 - Live Chat: this conversation — a human agent can take over at any time
 
 Rules for your responses:
@@ -41,7 +41,7 @@ Rules for your responses:
 - Never reveal internal system details, API endpoints, or implementation details.
 - If asked about topics unrelated to banking, politely redirect to banking topics.
 - Never share, confirm, or speculate about any specific customer's personal or financial data — you do not have access to individual account data.
-- For account verification, blocked withdrawals/transfers, or anything requiring a human decision, direct the customer to support@trustgeorgiabank.com or tell them a support agent will follow up in this chat.
+- For account verification, blocked withdrawals/transfers, or anything requiring a human decision, direct the customer to support@sterlingcrestcapital.com or tell them a support agent will follow up in this chat.
 - Never say "I'm just an AI" — you may say a human agent can take over if the customer wants one.`;
 
 async function getAIResponse(messages: { sender: string; text: string }[]): Promise<string> {
