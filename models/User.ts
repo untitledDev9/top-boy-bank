@@ -15,6 +15,7 @@ export interface IUser extends Document {
   verified_by: mongoose.Types.ObjectId | null;
   login_attempts: number;
   lock_until: Date | null;
+  pin_attempts: number;
   reset_token?: string;
   reset_token_expiry?: Date;
   created_at: Date;
@@ -95,6 +96,12 @@ const userSchema = new Schema<IUser>({
   lock_until: {
     type: Date,
     default: null,
+  },
+  // Wrong login-PIN guesses; unlike login_attempts this is not reset by a
+  // successful password login, only by a correct PIN.
+  pin_attempts: {
+    type: Number,
+    default: 0,
   },
   reset_token: {
     type: String,

@@ -256,17 +256,15 @@ export const verifyOtp = async (req: AuthRequest, res: Response, next: NextFunct
     user.otp_expiry = undefined;
     await user.save({ validateBeforeSave: false });
 
-    // If user has a transaction PIN, require it as second factor
-    if (user.transaction_pin) {
-      const pinToken = signPinToken(user._id, user.role);
-      res.json({ success: true, pin_required: true, pin_token: pinToken });
-      return;
-    }
-
-    // No PIN set — issue real auth token
-    const token = signToken(user._id, user.role);
-
-    res.json({ success: true, token, user: user.toJSON() });
+    // The PIN is always the second factor. Accounts without one yet (seeded or
+    // admin-created) create it on this step instead of skipping it.
+    const pinToken = signPinToken(user._id, user.role);
+    res.json({
+      success: true,
+      pin_required: true,
+      pin_setup_required: !user.transaction_pin,
+      pin_token: pinToken,
+    });
   } catch (error) {
     next(error);
   }
@@ -301,10 +299,43 @@ export const verifyPin = async (req: AuthRequest, res: Response, next: NextFunct
       return;
     }
 
-    if (pin !== user.transaction_pin) {
-      res.status(401).json({ success: false, message: 'Invalid PIN. Please try again.' });
+    if (user.isLocked()) {
+      const minutes = Math.ceil(((user.lock_until as Date).getTime() - Date.now()) / 60000);
+      res.status(423).json({
+        success: false,
+        message: `Account is temporarily locked due to too many failed attempts. Try again in ${minutes} minute(s).`,
+      });
       return;
     }
+
+    const submittedPin = String(pin);
+
+    if (!user.transaction_pin) {
+      // First sign-in without a PIN: the submitted PIN becomes the account's PIN.
+      if (!/^\d{4}$/.test(submittedPin)) {
+        res.status(400).json({ success: false, message: 'PIN must be exactly 4 digits.' });
+        return;
+      }
+      user.transaction_pin = submittedPin;
+    } else if (submittedPin !== user.transaction_pin) {
+      user.pin_attempts = (user.pin_attempts || 0) + 1;
+      const locked = user.pin_attempts >= 5;
+      if (locked) {
+        user.pin_attempts = 0;
+        user.lock_until = new Date(Date.now() + 15 * 60 * 1000);
+      }
+      await user.save({ validateBeforeSave: false });
+      res.status(locked ? 423 : 401).json({
+        success: false,
+        message: locked
+          ? 'Too many incorrect PIN attempts. Account locked for 15 minutes.'
+          : 'Invalid PIN. Please try again.',
+      });
+      return;
+    }
+
+    user.pin_attempts = 0;
+    await user.save({ validateBeforeSave: false });
 
     const token = signToken(user._id, user.role);
     res.json({ success: true, token, user: user.toJSON() });
