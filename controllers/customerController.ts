@@ -586,13 +586,7 @@ export const lookupAccount = async (req: AuthRequest, res: Response, next: NextF
        return;
     }
 
-    // Return masked name for privacy
-    const nameParts = user.full_name.split(' ');
-    const maskedName = nameParts
-      .map((part: string) => part[0] + '*'.repeat(Math.max(part.length - 1, 0)))
-      .join(' ');
-
-    res.json({ success: true, name: maskedName, currency: account.currency });
+    res.json({ success: true, name: user.full_name, currency: account.currency });
   } catch (error) {
     next(error);
   }
