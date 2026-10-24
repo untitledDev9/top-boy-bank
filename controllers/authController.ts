@@ -389,17 +389,20 @@ export const logout = (req: AuthRequest, res: Response): void => {
 export const getMe = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
     const user = req.user!;
-    let account = null;
 
-    if (user.role === 'customer') {
-      account = await Account.findOne({ user_id: user._id });
-    }
+    // This runs on every page load and after every transfer, and used to make
+    // four sequential database calls (auth, account, PIN lookup, settings).
+    // The remaining three are independent, so run them together; settings come
+    // from a short-lived cache and the PIN is checked for existence instead of
+    // being loaded.
+    const [account, hasPin, settings] = await Promise.all([
+      user.role === 'customer' ? Account.findOne({ user_id: user._id }) : Promise.resolve(null),
+      User.exists({ _id: user._id, transaction_pin: { $exists: true, $nin: [null, ''] } }),
+      Settings.getPublic(),
+    ]);
 
-    const fullUser = await User.findById(user._id).select('+transaction_pin');
     const userData = user.toJSON();
-    userData.has_transaction_pin = !!fullUser?.transaction_pin;
-
-    const settings = await Settings.getSingleton();
+    userData.has_transaction_pin = !!hasPin;
 
     res.json({
       success: true,

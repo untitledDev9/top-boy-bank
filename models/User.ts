@@ -1,5 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
-import bcrypt from 'bcryptjs';
+import { hashPassword, verifyPassword } from '../utils/passwordHash';
 
 export interface IUser extends Document {
   full_name: string;
@@ -173,14 +173,17 @@ const userSchema = new Schema<IUser>({
 // Covers the admin customer list's default { role: 'customer' } filter +
 // created_at sort, and the role-scoped counts used in analytics.
 userSchema.index({ role: 1, created_at: -1 });
+// Password-reset links are resolved by token; sparse because only users with a
+// pending reset carry the field, so the index stays tiny.
+userSchema.index({ reset_token: 1 }, { sparse: true });
 
 userSchema.pre('save', async function () {
   if (!this.isModified('password')) return;
-  this.password = await bcrypt.hash(this.password, 12);
+  this.password = await hashPassword(this.password);
 });
 
 userSchema.methods.comparePassword = async function (candidatePassword: string): Promise<boolean> {
-  return bcrypt.compare(candidatePassword, this.password);
+  return verifyPassword(candidatePassword, this.password);
 };
 
 userSchema.methods.isLocked = function (): boolean {

@@ -1,13 +1,17 @@
 import { Response, NextFunction } from 'express';
 import { validationResult } from 'express-validator';
+import mongoose from 'mongoose';
 import User from '../models/User';
 import Account from '../models/Account';
 import Transaction from '../models/Transaction';
 import Withdrawal from '../models/Withdrawal';
 import PayoutMethod from '../models/PayoutMethod';
 import Settings from '../models/Settings';
-import { AuthRequest } from '../middleware/protect';
+import { AuthRequest, invalidateUserCache } from '../middleware/protect';
 import sendEmail from '../utils/sendEmail';
+import escapeRegex from '../utils/escapeRegex';
+import { getAccountIdForUser } from '../utils/accountIdCache';
+import { debitIfFunded, creditAccount, reverseBalanceChange, LeanAccount } from '../utils/ledger';
 
 // Flat instant-transfer fee for card withdrawals; bank withdrawals stay free.
 const CARD_WITHDRAWAL_FEE_RATE = 0.015;
@@ -21,18 +25,24 @@ function defaultPayoutNickname(
   return `Card ••${String(f.card_number || '').replace(/\s/g, '').slice(-4)}`;
 }
 
+// Matches a stored, non-empty transaction PIN without loading the PIN itself.
+const HAS_PIN = { transaction_pin: { $exists: true, $nin: [null, ''] } };
+
 // Get customer profile + account
 export const getMe = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const account = await Account.findOne({ user_id: req.user!._id });
+    // Independent lookups — run together instead of one after the other.
+    const [account, hasPin] = await Promise.all([
+      Account.findOne({ user_id: req.user!._id }),
+      User.exists({ _id: req.user!._id, ...HAS_PIN }),
+    ]);
     if (!account) {
       res.status(404).json({ success: false, message: 'Account not found.' });
       return;
     }
 
-    const fullUser = await User.findById(req.user!._id).select('+transaction_pin');
     const userData = req.user!.toJSON();
-    userData.has_transaction_pin = !!fullUser?.transaction_pin;
+    userData.has_transaction_pin = !!hasPin;
 
     res.json({
       success: true,
@@ -50,8 +60,8 @@ export const getMe = async (req: AuthRequest, res: Response, next: NextFunction)
 // Get transactions with pagination, filters, search
 export const getTransactions = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const account = await Account.findOne({ user_id: req.user!._id });
-    if (!account) {
+    const accountId = await getAccountIdForUser(req.user!._id);
+    if (!accountId) {
       res.status(404).json({ success: false, message: 'Account not found.' });
       return;
     }
@@ -65,31 +75,40 @@ export const getTransactions = async (req: AuthRequest, res: Response, next: Nex
       end_date,
     } = req.query as Record<string, string>;
 
-    const query: any = { account_id: account._id, type: { $ne: 'adjustment' } };
+    const query: any = { account_id: accountId, type: { $ne: 'adjustment' } };
 
     if (type && ['debit', 'credit'].includes(type)) {
       query.type = type;
     }
 
     if (search) {
-      query.description = { $regex: search, $options: 'i' };
+      // Escaped so the search box matches text literally instead of being run
+      // as a regular expression (malformed patterns threw; hostile ones are a
+      // ReDoS risk).
+      query.description = { $regex: escapeRegex(String(search).slice(0, 100)), $options: 'i' };
     }
 
     if (start_date || end_date) {
       query.created_at = {};
       if (start_date) query.created_at.$gte = new Date(start_date);
       if (end_date) query.created_at.$lte = new Date(end_date);
+      const bad = [query.created_at.$gte, query.created_at.$lte].some((d) => d && Number.isNaN(d.getTime()));
+      if (bad) {
+        res.status(400).json({ success: false, message: 'Invalid start_date or end_date.' });
+        return;
+      }
     }
 
-    const pageNum = parseInt(page);
-    const limitNum = Math.min(parseInt(limit) || 20, 100);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
     const skip = (pageNum - 1) * limitNum;
-    const total = await Transaction.countDocuments(query);
 
-    const transactions = await Transaction.find(query)
-      .sort({ created_at: -1 })
-      .skip(skip)
-      .limit(limitNum);
+    // The count and the page are independent; lean() skips building Mongoose
+    // documents for rows that are only serialised straight back out.
+    const [total, transactions] = await Promise.all([
+      Transaction.countDocuments(query),
+      Transaction.find(query).sort({ created_at: -1 }).skip(skip).limit(limitNum).lean(),
+    ]);
 
     res.json({
       success: true,
@@ -116,24 +135,38 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
     }
 
     const {
-      amount, transaction_pin, method: bodyMethod,
+      transaction_pin, method: bodyMethod,
       bank_name, account_number, routing_number,
       card_number, card_expiry, card_name,
       payout_method_id, save_method,
     } = req.body;
 
-    if (!amount || amount <= 0) {
+    // Coerce once: a JSON string like "10" would otherwise be concatenated
+    // ("10" + fee) instead of added further down.
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
       res.status(400).json({ success: false, message: 'Amount must be greater than 0.' });
       return;
     }
 
-    const user = await User.findById(req.user!._id).select('+transaction_pin');
+    // None of these reads depend on each other — fetch them together, then
+    // apply the checks in the same order as before.
+    const [user, settings, saved, account] = await Promise.all([
+      User.findById(req.user!._id).select('+transaction_pin').lean(),
+      Settings.getPublic(),
+      payout_method_id
+        ? PayoutMethod.findOne({ _id: payout_method_id, user_id: req.user!._id })
+            .select('+account_number +routing_number +card_number +card_expiry +card_name')
+            .lean()
+        : Promise.resolve(null),
+      Account.findOne({ user_id: req.user!._id }),
+    ]);
+
     if (!user) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
 
-    const settings = await Settings.getSingleton();
     const blockReason = settings.maintenance_mode ? 'maintenance' : (!user.is_verified ? 'unverified' : null);
     if (blockReason) {
       res.status(403).json({
@@ -168,8 +201,6 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
     let finalCardName = card_name;
 
     if (payout_method_id) {
-      const saved = await PayoutMethod.findOne({ _id: payout_method_id, user_id: user._id })
-        .select('+account_number +routing_number +card_number +card_expiry +card_name');
       if (!saved) {
         res.status(404).json({ success: false, message: 'Saved payout method not found.' });
         return;
@@ -183,7 +214,6 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
       finalCardName = saved.card_name;
     }
 
-    const account = await Account.findOne({ user_id: req.user!._id });
     if (!account) {
       res.status(404).json({ success: false, message: 'Account not found.' });
       return;
@@ -193,11 +223,6 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
     // bank withdrawals stay free but take longer to settle.
     const fee = method === 'card' ? round2(amount * CARD_WITHDRAWAL_FEE_RATE) : 0;
     const totalDebited = round2(amount + fee);
-
-    if (account.balance < totalDebited) {
-      res.status(400).json({ success: false, message: 'Insufficient balance.' });
-      return;
-    }
 
     // Build a destination description from the payout method. We only ever
     // store a masked reference to the destination — never full card numbers.
@@ -213,35 +238,54 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
       eta = '1–5 business days';
     }
 
-    account.balance -= totalDebited;
-    account.updated_at = new Date();
-    await account.save();
+    // Debit atomically: the balance check and the subtraction are one operation,
+    // so two overlapping withdrawals can't both pass the check against the same
+    // starting balance.
+    const debited = await debitIfFunded(account._id, totalDebited);
+    if (!debited) {
+      res.status(400).json({ success: false, message: 'Insufficient balance.' });
+      return;
+    }
 
-    const transaction = await Transaction.create({
-      account_id: account._id,
-      type: 'debit',
-      amount: totalDebited,
-      balance_after: account.balance,
-      description: `Withdrawal to ${destination}${fee > 0 ? ` (includes $${fee.toFixed(2)} fee)` : ''}`,
-      created_by: req.user!._id,
-    });
+    // The ledger entry and the payout record are independent of each other.
+    // Persist the full destination details so the admin can review/process the
+    // payout. `amount` here is what the customer receives; `fee` is tracked separately.
+    const [txnResult, withdrawalResult] = await Promise.allSettled([
+      Transaction.create({
+        account_id: account._id,
+        type: 'debit',
+        amount: totalDebited,
+        balance_after: debited.balance,
+        description: `Withdrawal to ${destination}${fee > 0 ? ` (includes $${fee.toFixed(2)} fee)` : ''}`,
+        created_by: req.user!._id,
+      }),
+      Withdrawal.create({
+        user_id: user._id,
+        account_id: account._id,
+        amount,
+        fee,
+        method,
+        status: 'completed',
+        bank_name: method === 'bank' ? finalBankName : undefined,
+        destination_account: method === 'bank' ? finalAccountNumber : undefined,
+        routing_number: method === 'bank' ? finalRoutingNumber : undefined,
+        card_number: method === 'card' ? finalCardNumber : undefined,
+        card_expiry: method === 'card' ? finalCardExpiry : undefined,
+        card_name: method === 'card' ? finalCardName : undefined,
+      }),
+    ]);
 
-    // Persist the full destination details so the admin can review/process the payout.
-    // `amount` here is what the customer receives; `fee` is tracked separately.
-    await Withdrawal.create({
-      user_id: user._id,
-      account_id: account._id,
-      amount,
-      fee,
-      method,
-      status: 'completed',
-      bank_name: method === 'bank' ? finalBankName : undefined,
-      destination_account: method === 'bank' ? finalAccountNumber : undefined,
-      routing_number: method === 'bank' ? finalRoutingNumber : undefined,
-      card_number: method === 'card' ? finalCardNumber : undefined,
-      card_expiry: method === 'card' ? finalCardExpiry : undefined,
-      card_name: method === 'card' ? finalCardName : undefined,
-    });
+    if (txnResult.status === 'rejected' || withdrawalResult.status === 'rejected') {
+      // Money already left the balance; undo it (and whichever record did get
+      // written) so we never report a failure for funds that moved.
+      await Promise.allSettled([
+        reverseBalanceChange(account._id, totalDebited, 'withdrawal record failed'),
+        txnResult.status === 'fulfilled' ? Transaction.deleteOne({ _id: txnResult.value._id }) : Promise.resolve(),
+        withdrawalResult.status === 'fulfilled' ? Withdrawal.deleteOne({ _id: withdrawalResult.value._id }) : Promise.resolve(),
+      ]);
+      throw txnResult.status === 'rejected' ? txnResult.reason : (withdrawalResult as PromiseRejectedResult).reason;
+    }
+    const transaction = txnResult.value;
 
     // Notify admin of the withdrawal with full destination details.
     const destinationLines =
@@ -253,7 +297,7 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
       sendEmail({
         email: process.env.ADMIN_EMAIL,
         subject: `Sterling Crest Capital - New ${method === 'card' ? 'Card' : 'Bank'} Withdrawal`,
-        message: `A withdrawal has been initiated.\n\nCustomer: ${user.full_name} (${user.email})\nAmount: ${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} ${account.currency}${fee > 0 ? `\nFee: ${fee.toLocaleString('en-US', { minimumFractionDigits: 2 })} ${account.currency}` : ''}\nMethod: ${method}\nETA: ${eta}\n\n${destinationLines}\n\nRemaining balance: ${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+        message: `A withdrawal has been initiated.\n\nCustomer: ${user.full_name} (${user.email})\nAmount: ${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} ${account.currency}${fee > 0 ? `\nFee: ${fee.toLocaleString('en-US', { minimumFractionDigits: 2 })} ${account.currency}` : ''}\nMethod: ${method}\nETA: ${eta}\n\n${destinationLines}\n\nRemaining balance: ${debited.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
       }).catch((err) => console.error('Failed to send admin withdrawal email:', err));
     }
 
@@ -284,7 +328,7 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
       eta,
       fee,
       total_debited: totalDebited,
-      balance: account.balance,
+      balance: debited.balance,
       transaction,
     });
   } catch (error) {
@@ -341,6 +385,9 @@ export const updateProfile = async (req: AuthRequest, res: Response, next: NextF
     if (phone !== undefined) user.phone = phone.trim();
 
     await user.save({ validateBeforeSave: false });
+    // The auth middleware caches this record; drop it so the new name/email is
+    // used straight away.
+    invalidateUserCache(user._id);
 
     res.json({ success: true, user: user.toJSON(), message: 'Profile updated successfully.' });
   } catch (error) {
@@ -390,7 +437,7 @@ export const verifyTransactionPin = async (req: AuthRequest, res: Response, next
   try {
     const { transaction_pin } = req.body;
 
-    const user = await User.findById(req.user!._id).select('+transaction_pin');
+    const user = await User.findById(req.user!._id).select('+transaction_pin').lean();
     if (!user) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
@@ -417,24 +464,60 @@ export const verifyTransactionPin = async (req: AuthRequest, res: Response, next
   }
 };
 
+interface LeanRecipientUser {
+  _id: mongoose.Types.ObjectId;
+  full_name: string;
+  email: string;
+  is_active?: boolean;
+}
+
+// Resolves a transfer recipient from an account number or an email, keeping the
+// exact "not found" wording each lookup path has always returned.
+async function resolveRecipient(
+  recipientId: string
+): Promise<{ account: LeanAccount | null; user: LeanRecipientUser | null; notFound?: string }> {
+  if (recipientId.includes('@')) {
+    const user = (await User.findOne({ email: recipientId.toLowerCase().trim() })
+      .select('full_name email is_active')
+      .lean()) as LeanRecipientUser | null;
+    if (!user) return { account: null, user: null, notFound: 'Recipient not found.' };
+    const account = (await Account.findOne({ user_id: user._id }).lean()) as LeanAccount | null;
+    return { account, user, notFound: account ? undefined : 'Recipient not found.' };
+  }
+
+  const account = (await Account.findOne({ account_number: recipientId }).lean()) as LeanAccount | null;
+  if (!account) return { account: null, user: null, notFound: 'Recipient account not found.' };
+  const user = (await User.findById(account.user_id).select('full_name email is_active').lean()) as LeanRecipientUser | null;
+  return { account, user, notFound: user ? undefined : 'Recipient not found.' };
+}
+
 // Transfer to another account
 export const transfer = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { recipient_id, amount, description, transaction_pin } = req.body;
+    const { recipient_id, description, transaction_pin } = req.body;
+    const amount = Number(req.body.amount);
 
-    if (!recipient_id || !amount || amount <= 0) {
+    if (typeof recipient_id !== 'string' || !recipient_id || !Number.isFinite(amount) || amount <= 0) {
       res.status(400).json({ success: false, message: 'Valid recipient and amount are required.' });
       return;
     }
 
-    // Verify sender
-    const sender = await User.findById(req.user!._id).select('+transaction_pin');
+    // Sender, settings, sender account and the recipient don't depend on each
+    // other, so look them all up at once. They are still *checked* in the
+    // original order below, so every response (and what an unauthenticated-PIN
+    // caller can learn) is unchanged.
+    const [sender, settings, senderAccount, recipient] = await Promise.all([
+      User.findById(req.user!._id).select('+transaction_pin').lean(),
+      Settings.getPublic(),
+      Account.findOne({ user_id: req.user!._id }).lean() as Promise<LeanAccount | null>,
+      resolveRecipient(recipient_id),
+    ]);
+
     if (!sender) {
       res.status(404).json({ success: false, message: 'User not found.' });
       return;
     }
 
-    const settings = await Settings.getSingleton();
     const senderBlockReason = settings.maintenance_mode ? 'maintenance' : (!sender.is_verified ? 'unverified' : null);
     if (senderBlockReason) {
       res.status(403).json({
@@ -457,95 +540,100 @@ export const transfer = async (req: AuthRequest, res: Response, next: NextFuncti
       }
     }
 
-    const senderAccount = await Account.findOne({ user_id: req.user!._id });
     if (!senderAccount) {
       res.status(404).json({ success: false, message: 'Sender account not found.' });
       return;
     }
 
-    let recipientAccount;
-    let recipientUser;
-
-    if (recipient_id.includes('@')) {
-      recipientUser = await User.findOne({ email: recipient_id.toLowerCase().trim() });
-      if (!recipientUser) {
-        res.status(404).json({ success: false, message: 'Recipient not found.' });
-        return;
-      }
-      recipientAccount = await Account.findOne({ user_id: recipientUser._id });
-    } else {
-      recipientAccount = await Account.findOne({ account_number: recipient_id });
-      if (!recipientAccount) {
-         res.status(404).json({ success: false, message: 'Recipient account not found.' });
-         return;
-      }
-      recipientUser = await User.findById(recipientAccount.user_id);
-    }
-
-    if (!recipientAccount || !recipientUser) {
-      res.status(404).json({ success: false, message: 'Recipient not found.' });
+    if (recipient.notFound || !recipient.account || !recipient.user) {
+      res.status(404).json({ success: false, message: recipient.notFound || 'Recipient not found.' });
       return;
     }
+    const recipientAccount = recipient.account;
+    const recipientUser = recipient.user;
 
     if (senderAccount.account_number === recipientAccount.account_number) {
       res.status(400).json({ success: false, message: 'Cannot transfer to your own account.' });
       return;
     }
 
-    if (!recipientUser.is_active) {
+    // `=== false`: a missing field means "active" (the schema default), which a
+    // plain lean() read doesn't apply for us.
+    if (recipientUser.is_active === false) {
       res.status(400).json({ success: false, message: 'Recipient account is not active.' });
-      return;
-    }
-
-    if (senderAccount.balance < amount) {
-      res.status(400).json({ success: false, message: 'Insufficient balance.' });
       return;
     }
 
     const desc = description?.trim() || 'Transfer';
 
-    // Debit sender
-    senderAccount.balance -= amount;
-    senderAccount.updated_at = new Date();
-    await senderAccount.save();
-
-    // Credit recipient
-    recipientAccount.balance += amount;
-    recipientAccount.updated_at = new Date();
-    await recipientAccount.save();
-
-    const senderTxn = await Transaction.create({
-      account_id: senderAccount._id,
-      type: 'debit',
-      amount,
-      balance_after: senderAccount.balance,
-      description: `Transfer to ${recipientAccount.account_number} — ${desc}`,
-      created_by: req.user!._id,
-    });
-
-    await Transaction.create({
-      account_id: recipientAccount._id,
-      type: 'credit',
-      amount,
-      balance_after: recipientAccount.balance,
-      description: `Transfer from ${senderAccount.account_number} — ${desc}`,
-      created_by: req.user!._id,
-    });
-
-    try {
-      await sendEmail({
-        email: recipientUser.email,
-        subject: 'Sterling Crest Capital - Funds Received',
-        message: `Hello ${recipientUser.full_name},\n\nYou have just received a transfer of ${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${sender.full_name}.\n\nDescription: ${desc}\nYour new balance is: ${recipientAccount.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}\n\nThank you for choosing Sterling Crest Capital!`,
-      });
-    } catch (err) {
-      console.error('Failed to send receipt email to recipient:', err);
+    // 1) Debit the sender atomically — the balance check and the subtraction are
+    //    one operation, so concurrent transfers can't spend the same money twice.
+    const debited = await debitIfFunded(senderAccount._id, amount);
+    if (!debited) {
+      res.status(400).json({ success: false, message: 'Insufficient balance.' });
+      return;
     }
+
+    // 2) Credit the recipient atomically ($inc, not read-modify-write, so
+    //    simultaneous incoming transfers can't overwrite each other).
+    let credited: LeanAccount | null;
+    try {
+      credited = await creditAccount(recipientAccount._id, amount);
+    } catch (err) {
+      await reverseBalanceChange(senderAccount._id, amount, 'credit failed');
+      throw err;
+    }
+    if (!credited) {
+      // Recipient account vanished between lookup and credit — give the money back.
+      await reverseBalanceChange(senderAccount._id, amount, 'recipient account missing');
+      res.status(404).json({ success: false, message: 'Recipient account not found.' });
+      return;
+    }
+
+    // 3) Record both sides of the transfer in one round trip, using the balances
+    //    the atomic updates actually produced.
+    let senderTxn;
+    try {
+      [senderTxn] = await Transaction.insertMany([
+        {
+          account_id: senderAccount._id,
+          type: 'debit',
+          amount,
+          balance_after: debited.balance,
+          description: `Transfer to ${recipientAccount.account_number} — ${desc}`,
+          created_by: req.user!._id,
+        },
+        {
+          account_id: recipientAccount._id,
+          type: 'credit',
+          amount,
+          balance_after: credited.balance,
+          description: `Transfer from ${senderAccount.account_number} — ${desc}`,
+          created_by: req.user!._id,
+        },
+      ]);
+    } catch (err) {
+      // Balances moved but the history couldn't be written: undo both so the
+      // customer isn't told "failed" while funds have actually left.
+      await Promise.allSettled([
+        reverseBalanceChange(senderAccount._id, amount, 'ledger write failed'),
+        reverseBalanceChange(recipientAccount._id, -amount, 'ledger write failed'),
+      ]);
+      throw err;
+    }
+
+    // The receipt email is not part of the money movement and its failure was
+    // already ignored, so don't make the customer wait on an SMTP round trip.
+    sendEmail({
+      email: recipientUser.email,
+      subject: 'Sterling Crest Capital - Funds Received',
+      message: `Hello ${recipientUser.full_name},\n\nYou have just received a transfer of ${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${sender.full_name}.\n\nDescription: ${desc}\nYour new balance is: ${credited.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}\n\nThank you for choosing Sterling Crest Capital!`,
+    }).catch((err) => console.error('Failed to send receipt email to recipient:', err));
 
     res.json({
       success: true,
       message: 'Transfer successful.',
-      balance: senderAccount.balance,
+      balance: debited.balance,
       transaction: senderTxn,
       recipient_name: recipientUser.full_name,
     });
@@ -558,24 +646,26 @@ export const transfer = async (req: AuthRequest, res: Response, next: NextFuncti
 export const lookupAccount = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
     const recipient_id = req.params.recipient_id as string;
-    let account;
-    let user;
+    let account: { _id: mongoose.Types.ObjectId; user_id: mongoose.Types.ObjectId; currency?: string } | null;
+    let user: { full_name: string; is_active?: boolean } | null;
 
+    // Only the name and currency are returned, so read just those fields.
+    // `is_active === false`: a missing flag means active (the schema default).
     if (recipient_id.includes('@')) {
-      user = await User.findOne({ email: recipient_id.toLowerCase().trim() });
-      if (!user || !user.is_active) {
+      user = await User.findOne({ email: recipient_id.toLowerCase().trim() }).select('full_name is_active').lean();
+      if (!user || user.is_active === false) {
         res.status(404).json({ success: false, message: 'Account not found.' });
         return;
       }
-      account = await Account.findOne({ user_id: user._id });
+      account = await Account.findOne({ user_id: (user as any)._id }).select('user_id currency').lean();
     } else {
-      account = await Account.findOne({ account_number: recipient_id });
+      account = await Account.findOne({ account_number: recipient_id }).select('user_id currency').lean();
       if (!account) {
         res.status(404).json({ success: false, message: 'Account not found.' });
         return;
       }
-      user = await User.findById(account.user_id);
-      if (!user || !user.is_active) {
+      user = await User.findById(account.user_id).select('full_name is_active').lean();
+      if (!user || user.is_active === false) {
         res.status(404).json({ success: false, message: 'Account not found.' });
         return;
       }
@@ -586,7 +676,7 @@ export const lookupAccount = async (req: AuthRequest, res: Response, next: NextF
        return;
     }
 
-    res.json({ success: true, name: user.full_name, currency: account.currency });
+    res.json({ success: true, name: user.full_name, currency: account.currency || 'USD' });
   } catch (error) {
     next(error);
   }

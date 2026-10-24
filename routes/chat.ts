@@ -1,10 +1,12 @@
 import { Router, Response, NextFunction } from 'express';
+import type { Types } from 'mongoose';
 import protect, { AuthRequest } from '../middleware/protect';
 import Chat from '../models/Chat';
 
 const router = Router();
 
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+// Overridable (GROQ_URL) so tests can point at a local stand-in instead of the real API.
+const GROQ_URL = process.env.GROQ_URL || 'https://api.groq.com/openai/v1/chat/completions';
 
 // Shown if Groq is unreachable/misconfigured, or once an admin has claimed
 // the chat (chat.status === 'ai' means "not yet claimed by a human admin").
@@ -44,10 +46,18 @@ Rules for your responses:
 - For account verification, blocked withdrawals/transfers, or anything requiring a human decision, direct the customer to support@sterlingcrestcapital.com or tell them a support agent will follow up in this chat.
 - Never say "I'm just an AI" — you may say a human agent can take over if the customer wants one.`;
 
+// Only the most recent messages are sent to the model. The whole history used to
+// go out on every reply, so a long conversation made each call slower and more
+// expensive (and eventually risked the model's context limit).
+const AI_HISTORY_MESSAGES = Number(process.env.AI_HISTORY_MESSAGES ?? 20);
+// A hung provider must not leave the customer waiting forever — after this the
+// fallback reply is used instead.
+const AI_TIMEOUT_MS = Number(process.env.GROQ_TIMEOUT_MS ?? 20_000);
+
 async function getAIResponse(messages: { sender: string; text: string }[]): Promise<string> {
   const chatMessages = [
     { role: 'system' as const, content: SYSTEM_PROMPT },
-    ...messages.map((m) => ({
+    ...messages.slice(-AI_HISTORY_MESSAGES).map((m) => ({
       role: (m.sender === 'customer' ? 'user' : 'assistant') as 'user' | 'assistant',
       content: m.text,
     })),
@@ -65,6 +75,7 @@ async function getAIResponse(messages: { sender: string; text: string }[]): Prom
       temperature: 0.7,
       max_tokens: 512,
     }),
+    signal: AbortSignal.timeout(AI_TIMEOUT_MS),
   });
 
   if (!res.ok) throw new Error(`Groq API error: ${res.status}`);
@@ -73,6 +84,33 @@ async function getAIResponse(messages: { sender: string; text: string }[]): Prom
   const reply = data.choices?.[0]?.message?.content;
   if (!reply) throw new Error('No response from AI');
   return reply;
+}
+
+// Generates and stores the AI reply after the HTTP response has already gone
+// out (the customer's widget picks it up on its next poll). Never throws.
+async function replyWithAI(chatId: Types.ObjectId, aiMessages: { sender: string; text: string }[]): Promise<void> {
+  let text: string;
+  try {
+    text = await getAIResponse(aiMessages);
+  } catch (aiError) {
+    console.error('AI chat response failed:', aiError);
+    text = FALLBACK_REPLY_TEXT;
+  }
+
+  try {
+    // Append only while the chat is still waiting on the AI. If an admin took
+    // over (or the chat was closed) during the model call, a bot answer would be
+    // out of place. Mirrors what the Chat pre-save hook does for an AI chat.
+    await Chat.updateOne(
+      { _id: chatId, status: 'ai' },
+      {
+        $push: { messages: { sender: 'ai', text, created_at: new Date() } },
+        $set: { updated_at: new Date(), expires_at: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000) },
+      }
+    );
+  } catch (saveError) {
+    console.error('Failed to save AI chat reply:', saveError);
+  }
 }
 
 // POST /api/chat/start — start or resume a chat
@@ -102,7 +140,9 @@ router.post('/start', protect, async (req: AuthRequest, res: Response, next: Nex
 // GET /api/chat/:id — get chat messages (for polling)
 router.get('/:id', protect, async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const chat = await Chat.findOne({ _id: req.params.id, customer_id: req.user!._id });
+    // Polled every second by the chat widget: lean() skips building a Mongoose
+    // document (and every message subdocument) just to serialise it again.
+    const chat = await Chat.findOne({ _id: req.params.id, customer_id: req.user!._id }).lean();
     if (!chat) {
       res.status(404).json({ success: false, message: 'Chat not found' });
       return;
@@ -141,15 +181,7 @@ router.post('/:id/message', protect, async (req: AuthRequest, res: Response, nex
         .filter((m) => m.sender === 'customer' || m.sender === 'ai')
         .map((m) => ({ sender: m.sender, text: m.text }));
 
-      try {
-        const aiReply = await getAIResponse(aiMessages);
-        chat.messages.push({ sender: 'ai', text: aiReply, created_at: new Date() });
-        await chat.save();
-      } catch (aiError) {
-        console.error('AI chat response failed:', aiError);
-        chat.messages.push({ sender: 'ai', text: FALLBACK_REPLY_TEXT, created_at: new Date() });
-        await chat.save();
-      }
+      void replyWithAI(chat._id, aiMessages);
     }
   } catch (error) {
     next(error);

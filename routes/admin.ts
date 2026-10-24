@@ -72,7 +72,8 @@ router.get('/chats', async (req: AuthRequest, res: Response, next: NextFunction)
     const chats = await Chat.find({ status: { $ne: 'closed' } })
       .sort({ updated_at: -1 })
       .select('customer_name status admin_id updated_at messages')
-      .slice('messages', -1);
+      .slice('messages', -1)
+      .lean();
 
     const chatList = chats.map((c) => ({
       _id: c._id,
@@ -91,7 +92,7 @@ router.get('/chats', async (req: AuthRequest, res: Response, next: NextFunction)
 // GET /api/admin/chats/:id — get full chat
 router.get('/chats/:id', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const chat = await Chat.findById(req.params.id);
+    const chat = await Chat.findById(req.params.id).lean();
     if (!chat) {
       res.status(404).json({ success: false, message: 'Chat not found' });
       return;

@@ -7,6 +7,7 @@
     "dev": "nodemon --exec ts-node server.ts",
     "build": "npm rebuild && tsc",
     "start": "node dist/server.js",
+    "test": "node --test tests/unit.test.js tests/api.test.js",
     "seed": "ts-node seed.ts"
   },
   "keywords": [],
@@ -15,6 +16,7 @@
   "type": "commonjs",
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "compression": "^1.8.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
@@ -29,6 +31,7 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
+    "@types/compression": "^1.8.1",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
@@ -38,5 +41,8 @@
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "bcrypt": "^6.0.0"
   }
 }

@@ -50,5 +50,8 @@ chatSchema.pre('save', function () {
 // Covers the admin chat list's Chat.find({ status: { $ne: 'closed' } })
 // polled every second, sorted by updated_at.
 chatSchema.index({ status: 1, updated_at: -1 });
+// POST /chat/start looks up the customer's open chat by { customer_id, status }
+// and had no index to use, so it scanned every chat.
+chatSchema.index({ customer_id: 1, status: 1 });
 
 export default mongoose.model<IChat>('Chat', chatSchema);

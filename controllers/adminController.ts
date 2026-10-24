@@ -7,7 +7,10 @@ import AuditLog from '../models/AuditLog';
 import Settings, { DEFAULT_MAINTENANCE_MESSAGE } from '../models/Settings';
 import generateAccountNumber from '../utils/generateAccountNumber';
 import generateTransactionHistory from '../utils/generateTransactionHistory';
-import { AuthRequest } from '../middleware/protect';
+import { AuthRequest, invalidateUserCache } from '../middleware/protect';
+import { invalidateAccountIdCache } from '../utils/accountIdCache';
+import escapeRegex from '../utils/escapeRegex';
+import { debitIfFunded, creditAccount, reverseBalanceChange, LeanAccount } from '../utils/ledger';
 
 // List all customers with search & filter
 export const getUsers = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
@@ -17,9 +20,12 @@ export const getUsers = async (req: AuthRequest, res: Response, next: NextFuncti
     const query: any = { role: 'customer' };
 
     if (search) {
+      // Escaped: the search box is literal text, not a regular expression
+      // (malformed input threw; hostile patterns are a ReDoS risk).
+      const pattern = escapeRegex(String(search).slice(0, 100));
       query.$or = [
-        { full_name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
+        { full_name: { $regex: pattern, $options: 'i' } },
+        { email: { $regex: pattern, $options: 'i' } },
       ];
     }
 
@@ -28,8 +34,10 @@ export const getUsers = async (req: AuthRequest, res: Response, next: NextFuncti
     if (active === 'true') query.is_active = true;
     if (active === 'false') query.is_active = false;
 
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
+    // Bounded so a single request can't pull the whole collection (the admin
+    // history page asks for 200, so that is the ceiling).
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
     const skip = (pageNum - 1) * limitNum;
     const [total, users] = await Promise.all([
       User.countDocuments(query),
@@ -220,6 +228,7 @@ export const toggleVerify = async (req: AuthRequest, res: Response, next: NextFu
     }
 
     await user.save({ validateBeforeSave: false });
+    invalidateUserCache(user._id);
 
     await AuditLog.create({
       admin_id: req.user!._id,
@@ -268,6 +277,9 @@ export const setMaintenanceMode = async (req: AuthRequest, res: Response, next: 
     settings.updated_at = new Date();
     settings.updated_by = req.user!._id as any;
     await settings.save();
+    // Hot paths read a cached copy of these settings; clear it so the change
+    // applies immediately.
+    Settings.invalidatePublicCache();
 
     await AuditLog.create({
       admin_id: req.user!._id,
@@ -294,21 +306,33 @@ export const setMaintenanceMode = async (req: AuthRequest, res: Response, next: 
 // Analytics for admin dashboard
 export const getAnalytics = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    // None of these 6 queries depend on each other's results — running them
-    // sequentially was paying for 6 round-trips to the remote cluster on
-    // every admin dashboard load instead of 1.
-    const [totalUsers, verifiedUsers, activeUsers, balanceAgg, recentTransactions, recentAuditLogs] = await Promise.all([
-      User.countDocuments({ role: 'customer' }),
-      User.countDocuments({ role: 'customer', is_verified: true }),
-      User.countDocuments({ role: 'customer', is_active: true }),
+    // None of these queries depend on each other's results, so they run
+    // concurrently. The three user counts (total / verified / active) are one
+    // aggregation pass over the customers instead of three separate scans.
+    const [userCounts, balanceAgg, recentTransactions, recentAuditLogs] = await Promise.all([
+      User.aggregate([
+        { $match: { role: 'customer' } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            verified: { $sum: { $cond: ['$is_verified', 1, 0] } },
+            active: { $sum: { $cond: ['$is_active', 1, 0] } },
+          },
+        },
+      ]),
       Account.aggregate([{ $group: { _id: null, total: { $sum: '$balance' } } }]),
-      Transaction.find().sort({ created_at: -1 }).limit(10),
+      Transaction.find().sort({ created_at: -1 }).limit(10).lean(),
       AuditLog.find()
         .sort({ created_at: -1 })
         .limit(10)
         .populate('admin_id', 'full_name email')
-        .populate('target_user_id', 'full_name email'),
+        .populate('target_user_id', 'full_name email')
+        .lean(),
     ]);
+    const totalUsers = userCounts[0]?.total || 0;
+    const verifiedUsers = userCounts[0]?.verified || 0;
+    const activeUsers = userCounts[0]?.active || 0;
     const totalBalance = balanceAgg[0]?.total || 0;
 
     res.json({
@@ -330,49 +354,69 @@ export const getAnalytics = async (req: AuthRequest, res: Response, next: NextFu
 // Add transaction to a customer's account
 export const addTransaction = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { type, amount, description, date } = req.body;
+    const { type, description, date } = req.body;
+    // Coerce once: a JSON string amount would otherwise be concatenated onto the
+    // balance instead of added to it.
+    const amount = Number(req.body.amount);
 
     if (!['credit', 'debit'].includes(type)) {
       res.status(400).json({ success: false, message: 'Type must be credit or debit.' });
       return;
     }
-    if (!amount || amount <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       res.status(400).json({ success: false, message: 'Amount must be greater than 0.' });
       return;
     }
 
-    const user = await User.findById(req.params.id);
+    // The account is looked up by the same id, so there's no need to wait for
+    // the user lookup first.
+    const [user, account] = await Promise.all([
+      User.findById(req.params.id).select('role').lean(),
+      Account.findOne({ user_id: req.params.id }).select('_id').lean(),
+    ]);
     if (!user || user.role !== 'customer') {
       res.status(404).json({ success: false, message: 'Customer not found.' });
       return;
     }
-
-    const account = await Account.findOne({ user_id: user._id });
     if (!account) {
       res.status(404).json({ success: false, message: 'Account not found.' });
       return;
     }
 
-    if (type === 'debit' && account.balance < amount) {
-      res.status(400).json({ success: false, message: 'Insufficient balance for this debit.' });
-      return;
+    // Atomic balance change: the funds check and the update are one operation,
+    // so this can't race with a customer's own transfer or withdrawal.
+    let updated: LeanAccount | null;
+    if (type === 'debit') {
+      updated = await debitIfFunded(account._id, amount);
+      if (!updated) {
+        res.status(400).json({ success: false, message: 'Insufficient balance for this debit.' });
+        return;
+      }
+    } else {
+      updated = await creditAccount(account._id, amount);
+      if (!updated) {
+        res.status(404).json({ success: false, message: 'Account not found.' });
+        return;
+      }
     }
+    const newBalance = updated.balance;
 
-    const newBalance = type === 'credit' ? account.balance + amount : account.balance - amount;
-
-    account.balance = newBalance;
-    account.updated_at = new Date();
-    await account.save();
-
-    const transaction = await Transaction.create({
-      account_id: account._id,
-      type,
-      amount,
-      balance_after: newBalance,
-      description: description || (type === 'credit' ? 'Credit' : 'Debit'),
-      created_at: date ? new Date(date) : new Date(),
-      created_by: req.user!._id,
-    });
+    let transaction;
+    try {
+      transaction = await Transaction.create({
+        account_id: account._id,
+        type,
+        amount,
+        balance_after: newBalance,
+        description: description || (type === 'credit' ? 'Credit' : 'Debit'),
+        created_at: date ? new Date(date) : new Date(),
+        created_by: req.user!._id,
+      });
+    } catch (err) {
+      // Don't leave a balance change with no history entry behind.
+      await reverseBalanceChange(account._id, type === 'credit' ? -amount : amount, 'admin transaction record failed');
+      throw err;
+    }
 
     await AuditLog.create({
       admin_id: req.user!._id,
@@ -381,7 +425,7 @@ export const addTransaction = async (req: AuthRequest, res: Response, next: Next
       details: { type, amount, description, balance_after: newBalance },
     });
 
-    res.status(201).json({ success: true, transaction, account, message: 'Transaction added successfully.' });
+    res.status(201).json({ success: true, transaction, account: updated, message: 'Transaction added successfully.' });
   } catch (error) {
     next(error);
   }
@@ -411,6 +455,8 @@ export const deleteUser = async (req: AuthRequest, res: Response, next: NextFunc
     });
 
     await user.deleteOne();
+    invalidateUserCache(user._id);
+    invalidateAccountIdCache(user._id);
 
     res.json({ success: true, message: 'Customer deleted successfully.' });
   } catch (error) {
@@ -461,6 +507,8 @@ export const deactivateUser = async (req: AuthRequest, res: Response, next: Next
 
     user.is_active = !user.is_active;
     await user.save({ validateBeforeSave: false });
+    // Takes effect on the very next request, not after the auth cache expires.
+    invalidateUserCache(user._id);
 
     await AuditLog.create({
       admin_id: req.user!._id,

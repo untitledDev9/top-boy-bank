@@ -55,7 +55,9 @@ export function setupSocket(server: HttpServer, allowedOrigins: string[]) {
       try {
         const chats = await Chat.find({ status: { $ne: 'closed' } })
           .sort({ updated_at: -1 })
-          .select('customer_name status admin_id updated_at messages');
+          .select('customer_name status admin_id updated_at messages')
+          .slice('messages', -1)
+          .lean();
 
         const chatList = chats.map((c) => ({
           _id: c._id,
@@ -133,7 +135,9 @@ export function setupSocket(server: HttpServer, allowedOrigins: string[]) {
       try {
         const chats = await Chat.find({ status: { $ne: 'closed' } })
           .sort({ updated_at: -1 })
-          .select('customer_name status admin_id updated_at messages');
+          .select('customer_name status admin_id updated_at messages')
+          .slice('messages', -1)
+          .lean();
 
         const chatList = chats.map((c) => ({
           _id: c._id,
