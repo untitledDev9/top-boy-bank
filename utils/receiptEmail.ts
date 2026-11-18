@@ -12,8 +12,6 @@ const escapeHtml = (value: string): string =>
 const money = (value: number, currency: string): string =>
   `${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
 
-const last4 = (accountNumber: string): string => `•••• ${String(accountNumber).slice(-4)}`;
-
 export interface IncomingReceipt {
   recipientName: string;
   senderName: string;
@@ -38,8 +36,8 @@ export const buildReceiptText = (r: IncomingReceipt): string =>
     '',
     `Reference: ${r.reference}`,
     `Date: ${formatDate(r.date)}`,
-    `From: ${r.senderName} (account ${last4(r.senderAccountNumber)})`,
-    `To: your account ${last4(r.recipientAccountNumber)}`,
+    `From: ${r.senderName} (account ${r.senderAccountNumber})`,
+    `To: ${r.recipientName} (account ${r.recipientAccountNumber})`,
     `Description: ${r.description}`,
     `Amount received: ${money(r.amount, r.currency)}`,
     `New balance: ${money(r.newBalance, r.currency)}`,
@@ -89,7 +87,7 @@ export const buildReceiptHtml = (r: IncomingReceipt): string => {
             </tr>
             <tr>
               <td style="padding:12px 28px 24px;">
-                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px;">${row('Reference', escapeHtml(r.reference))}${row('Date', escapeHtml(formatDate(r.date)))}${row('From', `${sender}<br /><span style="color:#6b7280;font-size:12px;">Account ${escapeHtml(last4(r.senderAccountNumber))}</span>`)}${row('To', `Your account<br /><span style="color:#6b7280;font-size:12px;">Account ${escapeHtml(last4(r.recipientAccountNumber))}</span>`)}${row('Description', description)}${row('Amount received', `<strong>${amount}</strong>`)}${row('New balance', balance)}
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px;">${row('Reference', escapeHtml(r.reference))}${row('Date', escapeHtml(formatDate(r.date)))}${row('From', `${sender}<br /><span style="color:#6b7280;font-size:12px;">Account ${escapeHtml(String(r.senderAccountNumber))}</span>`)}${row('To', `${name}<br /><span style="color:#6b7280;font-size:12px;">Account ${escapeHtml(String(r.recipientAccountNumber))}</span>`)}${row('Description', description)}${row('Amount received', `<strong>${amount}</strong>`)}${row('New balance', balance)}
                 </table>
               </td>
             </tr>
