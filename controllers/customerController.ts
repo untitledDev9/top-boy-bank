@@ -9,6 +9,7 @@ import PayoutMethod from '../models/PayoutMethod';
 import Settings from '../models/Settings';
 import { AuthRequest, invalidateUserCache } from '../middleware/protect';
 import sendEmail from '../utils/sendEmail';
+import { IncomingReceipt, buildReceiptSubject, buildReceiptText, buildReceiptHtml } from '../utils/receiptEmail';
 import escapeRegex from '../utils/escapeRegex';
 import { getAccountIdForUser } from '../utils/accountIdCache';
 import { debitIfFunded, creditAccount, reverseBalanceChange, LeanAccount } from '../utils/ledger';
@@ -624,10 +625,23 @@ export const transfer = async (req: AuthRequest, res: Response, next: NextFuncti
 
     // The receipt email is not part of the money movement and its failure was
     // already ignored, so don't make the customer wait on an SMTP round trip.
+    const receipt: IncomingReceipt = {
+      recipientName: recipientUser.full_name,
+      senderName: sender.full_name,
+      senderAccountNumber: senderAccount.account_number,
+      recipientAccountNumber: recipientAccount.account_number,
+      amount,
+      newBalance: credited.balance,
+      currency: credited.currency || 'USD',
+      description: desc,
+      reference: `TXN-${String(senderTxn?._id ?? '').slice(-8).toUpperCase() || 'PENDING'}`,
+      date: new Date(),
+    };
     sendEmail({
       email: recipientUser.email,
-      subject: 'Sterling Crest Capital - Funds Received',
-      message: `Hello ${recipientUser.full_name},\n\nYou have just received a transfer of ${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} from ${sender.full_name}.\n\nDescription: ${desc}\nYour new balance is: ${credited.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}\n\nThank you for choosing Sterling Crest Capital!`,
+      subject: buildReceiptSubject(receipt),
+      message: buildReceiptText(receipt),
+      html: buildReceiptHtml(receipt),
     }).catch((err) => console.error('Failed to send receipt email to recipient:', err));
 
     res.json({

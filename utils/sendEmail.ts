@@ -4,6 +4,8 @@ interface EmailOptions {
   email: string;
   subject: string;
   message: string;
+  // Optional HTML body. `message` stays as the plain-text fallback.
+  html?: string;
 }
 
 // One pooled transporter for the whole process. Building a transporter per
@@ -38,7 +40,9 @@ const getTransporter = (): Transporter => {
 
 // Resend over HTTPS (port 443). Hosts like Render often can't reach SMTP
 // ports (465/587), which surfaces as ENETUNREACH/ETIMEDOUT with Gmail.
-const sendViaResend = async (message: { from: string; to: string; subject: string; text: string }): Promise<void> => {
+type OutgoingMessage = { from: string; to: string; subject: string; text: string; html?: string };
+
+const sendViaResend = async (message: OutgoingMessage): Promise<void> => {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -59,6 +63,7 @@ const sendEmail = async (options: EmailOptions): Promise<void> => {
     to: options.email,
     subject: options.subject,
     text: options.message,
+    ...(options.html ? { html: options.html } : {}),
   };
 
   // Prefer Resend when configured; otherwise fall back to SMTP (local dev).
