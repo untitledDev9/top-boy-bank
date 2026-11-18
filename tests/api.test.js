@@ -522,6 +522,48 @@ describe('API', { skip: hasMongo ? false : SKIP_REASON }, () => {
       const u = await app.makeUser();
       assert.equal((await app.request('GET', '/api/admin/users', { token: u.token })).status, 403);
       assert.equal((await app.request('GET', '/api/admin/analytics', { token: u.token })).status, 403);
+      assert.equal((await app.request('POST', '/api/admin/admins', {
+        token: u.token,
+        body: { full_name: 'Another Admin', email: 'another-admin@test.local', password: 'strongpass123' },
+      })).status, 403);
+    });
+
+    it('creates a separate admin login without creating a customer account', async () => {
+      const email = 'new-admin@test.local';
+      const password = 'strongpass123';
+      const created = await app.request('POST', '/api/admin/admins', {
+        token: admin.token,
+        body: { full_name: 'New Administrator', email, password },
+      });
+
+      assert.equal(created.status, 201);
+      assert.equal(created.body.admin.email, email);
+      assert.equal(created.body.admin.role, 'admin');
+      assert.equal('password' in created.body.admin, false);
+      assert.equal(await app.db.collection('accounts').countDocuments({ user_id: new app.ObjectId(created.body.admin._id) }), 0);
+
+      const stored = await app.db.collection('users').findOne({ email });
+      assert.equal(stored.role, 'admin');
+      assert.notEqual(stored.password, password);
+
+      const login = await app.request('POST', '/api/auth/admin/login', { body: { email, password } });
+      assert.equal(login.status, 200);
+      assert.equal(login.body.user.role, 'admin');
+    });
+
+    it('rejects duplicate admin emails and passwords shorter than eight characters', async () => {
+      const duplicate = await app.request('POST', '/api/admin/admins', {
+        token: admin.token,
+        body: { full_name: 'Duplicate Admin', email: admin.email, password: 'strongpass123' },
+      });
+      assert.equal(duplicate.status, 400);
+      assert.equal(duplicate.body.message, 'Email is already in use.');
+
+      const shortPassword = await app.request('POST', '/api/admin/admins', {
+        token: admin.token,
+        body: { full_name: 'Short Password', email: 'short-admin@test.local', password: 'short' },
+      });
+      assert.equal(shortPassword.status, 400);
     });
 
     it('analytics counts customers, verified and active users, and sums balances', async () => {

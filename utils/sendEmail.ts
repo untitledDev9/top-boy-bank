@@ -36,14 +36,36 @@ const getTransporter = (): Transporter => {
   return transporter;
 };
 
+// Resend over HTTPS (port 443). Hosts like Render often can't reach SMTP
+// ports (465/587), which surfaces as ENETUNREACH/ETIMEDOUT with Gmail.
+const sendViaResend = async (message: { from: string; to: string; subject: string; text: string }): Promise<void> => {
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(message),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new Error(`Resend API ${res.status}: ${await res.text().catch(() => '')}`);
+  }
+};
+
 const sendEmail = async (options: EmailOptions): Promise<void> => {
   const message = {
-    from: process.env.EMAIL_FROM || '"Sterling Crest Capital" <noreply@sterlingcrestcapital.com>',
+    from: process.env.EMAIL_FROM || '"Sterling Crest Capital" <noreply@sterlingcrest.ventures>',
     to: options.email,
     subject: options.subject,
     text: options.message,
   };
 
+  // Prefer Resend when configured; otherwise fall back to SMTP (local dev).
+  if (process.env.RESEND_API_KEY) {
+    await sendViaResend(message);
+    return;
+  }
   await getTransporter().sendMail(message);
 };
 

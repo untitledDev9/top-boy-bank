@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { validationResult } from 'express-validator';
 import User from '../models/User';
 import Account from '../models/Account';
 import Transaction from '../models/Transaction';
@@ -112,6 +113,45 @@ export const createUser = async (req: AuthRequest, res: Response, next: NextFunc
     });
 
     res.status(201).json({ success: true, user: user.toJSON(), account });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Create an additional administrator. This endpoint is protected by the
+// admin router's protect/adminOnly middleware.
+export const createAdmin = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({ success: false, message: errors.array()[0].msg, errors: errors.array() });
+      return;
+    }
+
+    const { full_name, email, password } = req.body;
+    const existing = await User.findOne({ email }).select('_id').lean();
+    if (existing) {
+      res.status(400).json({ success: false, message: 'Email is already in use.' });
+      return;
+    }
+
+    const admin = await User.create({
+      full_name,
+      email,
+      password,
+      role: 'admin',
+      is_verified: true,
+      is_active: true,
+    });
+
+    await AuditLog.create({
+      admin_id: req.user!._id,
+      action: 'CREATE_ADMIN',
+      target_user_id: admin._id,
+      details: { email, full_name },
+    });
+
+    res.status(201).json({ success: true, admin: admin.toJSON() });
   } catch (error) {
     next(error);
   }
