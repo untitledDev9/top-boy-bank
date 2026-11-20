@@ -2,6 +2,7 @@ import { Router, Response, NextFunction } from 'express';
 import type { Types } from 'mongoose';
 import protect, { AuthRequest } from '../middleware/protect';
 import Chat from '../models/Chat';
+import { notifyAdmins } from '../utils/adminNotifications';
 
 const router = Router();
 
@@ -171,6 +172,15 @@ router.post('/:id/message', protect, async (req: AuthRequest, res: Response, nex
     // Save customer message
     chat.messages.push({ sender: 'customer', text: text.trim(), created_at: new Date() });
     await chat.save();
+
+    notifyAdmins({
+      id: chat._id.toString() + '-' + Date.now(),
+      type: 'message',
+      title: 'New customer message',
+      message: `${req.user!.full_name} sent a message`,
+      url: '/sharp/chats',
+      created_at: new Date().toISOString(),
+    });
 
     // Respond immediately — the AI reply is generated in the background and
     // picked up by the frontend's polling, since it involves a network call.

@@ -29,7 +29,7 @@ export const debitIfFunded = (accountId: AccountId, amount: number): Promise<Lea
   Account.findOneAndUpdate(
     { _id: accountId, balance: { $gte: amount } },
     { $inc: { balance: -amount }, $set: { updated_at: new Date() } },
-    { new: true, lean: true }
+    { returnDocument: 'after', lean: true }
   ) as unknown as Promise<LeanAccount | null>;
 
 /** Adds `amount`. Resolves to the updated account, or null if it doesn't exist. */
@@ -37,7 +37,7 @@ export const creditAccount = (accountId: AccountId, amount: number): Promise<Lea
   Account.findOneAndUpdate(
     { _id: accountId },
     { $inc: { balance: amount }, $set: { updated_at: new Date() } },
-    { new: true, lean: true }
+    { returnDocument: 'after', lean: true }
   ) as unknown as Promise<LeanAccount | null>;
 
 /**

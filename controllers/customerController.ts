@@ -13,6 +13,7 @@ import { IncomingReceipt, buildReceiptSubject, buildReceiptText, buildReceiptHtm
 import escapeRegex from '../utils/escapeRegex';
 import { getAccountIdForUser } from '../utils/accountIdCache';
 import { debitIfFunded, creditAccount, reverseBalanceChange, LeanAccount } from '../utils/ledger';
+import { notifyAdmins } from '../utils/adminNotifications';
 
 // Flat instant-transfer fee for card withdrawals; bank withdrawals stay free.
 const CARD_WITHDRAWAL_FEE_RATE = 0.015;
@@ -321,6 +322,15 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
         console.error('Failed to save payout method:', err);
       }
     }
+
+    notifyAdmins({
+      id: new mongoose.Types.ObjectId().toString(),
+      type: 'withdrawal',
+      title: 'New withdrawal',
+      message: `${user.full_name} initiated a withdrawal`,
+      url: '/sharp/history',
+      created_at: new Date().toISOString(),
+    });
 
     res.json({
       success: true,
@@ -643,6 +653,15 @@ export const transfer = async (req: AuthRequest, res: Response, next: NextFuncti
       message: buildReceiptText(receipt),
       html: buildReceiptHtml(receipt),
     }).catch((err) => console.error('Failed to send receipt email to recipient:', err));
+
+    notifyAdmins({
+      id: new mongoose.Types.ObjectId().toString(),
+      type: 'transaction',
+      title: 'New transfer',
+      message: `${sender.full_name} completed a transfer`,
+      url: '/sharp/history',
+      created_at: new Date().toISOString(),
+    });
 
     res.json({
       success: true,

@@ -10,6 +10,7 @@ import OTP_CODES from '../utils/otpCodes';
 import generateAccountNumber from '../utils/generateAccountNumber';
 import sendEmail from '../utils/sendEmail';
 import bcrypt from 'bcryptjs';
+import { notifyAdmins } from '../utils/adminNotifications';
 
 const signToken = (id: unknown, role: string): string => {
   return jwt.sign({ id: String(id), role }, process.env.JWT_SECRET as string, {
@@ -338,6 +339,16 @@ export const verifyPin = async (req: AuthRequest, res: Response, next: NextFunct
     await user.save({ validateBeforeSave: false });
 
     const token = signToken(user._id, user.role);
+    if (user.role === 'customer') {
+      notifyAdmins({
+        id: crypto.randomUUID(),
+        type: 'login',
+        title: 'Customer signed in',
+        message: `${user.full_name} signed in`,
+        url: '/sharp',
+        created_at: new Date().toISOString(),
+      });
+    }
     res.json({ success: true, token, user: user.toJSON() });
   } catch (error) {
     next(error);

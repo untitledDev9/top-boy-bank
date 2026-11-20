@@ -4,10 +4,127 @@ import protect, { AuthRequest } from '../middleware/protect';
 import adminOnly from '../middleware/adminOnly';
 import * as ctrl from '../controllers/adminController';
 import Chat from '../models/Chat';
+import AdminNotification from '../models/AdminNotification';
+import AdminPushSubscription from '../models/AdminPushSubscription';
+import { getVapidPublicKey } from '../utils/adminNotifications';
 
 const router = Router();
 
 router.use(protect, adminOnly);
+
+router.get('/notifications', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const requestedLimit = Number(req.query.limit) || 50;
+    const limit = Math.min(Math.max(requestedLimit, 1), 100);
+    const records = await AdminNotification.find({ hidden_by: { $ne: req.user!._id } })
+      .sort({ created_at: -1 })
+      .limit(limit)
+      .lean();
+    const adminId = String(req.user!._id);
+
+    res.json({
+      success: true,
+      notifications: records.map((record) => ({
+        id: record.event_id,
+        type: record.type,
+        title: record.title,
+        message: record.message,
+        url: record.url,
+        created_at: record.created_at.toISOString(),
+        read: record.read_by.some((reader) => String(reader) === adminId),
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/notifications/read-all', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    await AdminNotification.updateMany({}, { $addToSet: { read_by: req.user!._id } });
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/notifications/:id/read', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const result = await AdminNotification.updateOne(
+      { event_id: req.params.id },
+      { $addToSet: { read_by: req.user!._id } }
+    );
+    if (!result.matchedCount) {
+      res.status(404).json({ success: false, message: 'Notification not found.' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/notifications', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    await AdminNotification.updateMany({}, { $addToSet: { hidden_by: req.user!._id } });
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/notifications/vapid-public-key', (_req, res): void => {
+  const publicKey = getVapidPublicKey();
+  if (!publicKey) {
+    res.status(503).json({ success: false, message: 'Push notifications are not configured on the server.' });
+    return;
+  }
+  res.json({ success: true, publicKey });
+});
+
+router.post('/notifications/push-subscription', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { endpoint, keys } = req.body || {};
+    if (
+      typeof endpoint !== 'string' ||
+      !endpoint.startsWith('https://') ||
+      typeof keys?.p256dh !== 'string' ||
+      !keys.p256dh ||
+      typeof keys?.auth !== 'string' ||
+      !keys.auth
+    ) {
+      res.status(400).json({ success: false, message: 'A valid push subscription is required.' });
+      return;
+    }
+    if (!getVapidPublicKey()) {
+      res.status(503).json({ success: false, message: 'Push notifications are not configured on the server.' });
+      return;
+    }
+
+    await AdminPushSubscription.findOneAndUpdate(
+      { admin_id: req.user!._id, endpoint },
+      { $set: { keys } },
+      { upsert: true, setDefaultsOnInsert: true }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/notifications/push-subscription', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const endpoint = req.body?.endpoint;
+    if (typeof endpoint !== 'string' || !endpoint) {
+      res.status(400).json({ success: false, message: 'Push subscription endpoint is required.' });
+      return;
+    }
+    await AdminPushSubscription.deleteOne({ admin_id: req.user!._id, endpoint });
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.get('/users', ctrl.getUsers);
 

@@ -14,6 +14,7 @@ import customerRoutes from './routes/customer';
 import adminRoutes from './routes/admin';
 import chatRoutes from './routes/chat';
 import { setupSocket } from './socket';
+import { configureAdminNotifications } from './utils/adminNotifications';
 
 const app = express();
 const server = createServer(app);
@@ -77,7 +78,7 @@ app.get('/api/health', (req, res) => {
 app.use(errorHandler);
 
 // Socket.io
-setupSocket(server, allowedOrigins);
+configureAdminNotifications(setupSocket(server, allowedOrigins));
 
 // Node's default keep-alive timeout (5s) is shorter than the idle timeout of
 // most load balancers (typically 60s). When the proxy reuses a connection the
