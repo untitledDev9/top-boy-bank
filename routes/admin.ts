@@ -7,10 +7,23 @@ import Chat from '../models/Chat';
 import AdminNotification from '../models/AdminNotification';
 import AdminPushSubscription from '../models/AdminPushSubscription';
 import { getVapidPublicKey } from '../utils/adminNotifications';
+import { notifyAdmins } from '../utils/adminNotifications';
 
 const router = Router();
 
 router.use(protect, adminOnly);
+
+router.post('/notifications/test', (req: AuthRequest, res: Response): void => {
+  notifyAdmins({
+    id: `test-${Date.now()}-${req.user!._id}`,
+    type: 'message',
+    title: 'Test notification',
+    message: 'Live admin notifications are working.',
+    url: '/sharp',
+    created_at: new Date().toISOString(),
+  });
+  res.json({ success: true });
+});
 
 router.get('/notifications', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
