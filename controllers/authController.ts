@@ -343,7 +343,7 @@ export const verifyPin = async (req: AuthRequest, res: Response, next: NextFunct
       notifyAdmins({
         id: crypto.randomUUID(),
         type: 'login',
-        title: 'Customer signed in',
+        title: `${user.full_name} signed in`,
         message: `${user.full_name} signed in`,
         url: '/sharp',
         created_at: new Date().toISOString(),

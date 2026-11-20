@@ -326,7 +326,7 @@ export const withdraw = async (req: AuthRequest, res: Response, next: NextFuncti
     notifyAdmins({
       id: new mongoose.Types.ObjectId().toString(),
       type: 'withdrawal',
-      title: 'New withdrawal',
+      title: `Withdrawal from ${user.full_name}`,
       message: `${user.full_name} initiated a withdrawal`,
       url: '/sharp/history',
       created_at: new Date().toISOString(),
@@ -657,7 +657,7 @@ export const transfer = async (req: AuthRequest, res: Response, next: NextFuncti
     notifyAdmins({
       id: new mongoose.Types.ObjectId().toString(),
       type: 'transaction',
-      title: 'New transfer',
+      title: `Transfer from ${sender.full_name}`,
       message: `${sender.full_name} completed a transfer`,
       url: '/sharp/history',
       created_at: new Date().toISOString(),

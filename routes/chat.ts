@@ -177,7 +177,7 @@ router.post('/:id/message', protect, async (req: AuthRequest, res: Response, nex
     notifyAdmins({
       id: `chat-${chat._id}-${sentAt.toISOString()}`,
       type: 'message',
-      title: 'New customer message',
+      title: `Message from ${req.user!.full_name}`,
       message: `${req.user!.full_name} sent a message`,
       url: '/sharp/chats',
       created_at: new Date().toISOString(),

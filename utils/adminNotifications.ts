@@ -92,8 +92,8 @@ async function sendPushNotifications(
           id: notification.id,
           type: notification.type,
           title: notification.title,
-          message: `${notification.title} in your admin dashboard.`,
-          body: `${notification.title} in your admin dashboard.`,
+          message: notification.message,
+          body: notification.message,
           url: notification.url,
           created_at: notification.created_at,
         })
