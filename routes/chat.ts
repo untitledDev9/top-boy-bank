@@ -173,8 +173,9 @@ router.post('/:id/message', protect, async (req: AuthRequest, res: Response, nex
     chat.messages.push({ sender: 'customer', text: text.trim(), created_at: new Date() });
     await chat.save();
 
+    const sentAt = chat.messages[chat.messages.length - 1].created_at as Date;
     notifyAdmins({
-      id: chat._id.toString() + '-' + Date.now(),
+      id: `chat-${chat._id}-${sentAt.toISOString()}`,
       type: 'message',
       title: 'New customer message',
       message: `${req.user!.full_name} sent a message`,
