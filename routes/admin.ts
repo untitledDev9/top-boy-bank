@@ -7,22 +7,65 @@ import Chat from '../models/Chat';
 import AdminNotification from '../models/AdminNotification';
 import AdminPushSubscription from '../models/AdminPushSubscription';
 import { getVapidPublicKey } from '../utils/adminNotifications';
-import { notifyAdmins } from '../utils/adminNotifications';
+import { dispatchAdminNotification, notifyAdmins } from '../utils/adminNotifications';
 
 const router = Router();
 
 router.use(protect, adminOnly);
 
-router.post('/notifications/test', (req: AuthRequest, res: Response): void => {
-  notifyAdmins({
-    id: `test-${Date.now()}-${req.user!._id}`,
-    type: 'message',
-    title: 'Test notification',
-    message: 'Live admin notifications are working.',
-    url: '/sharp',
-    created_at: new Date().toISOString(),
-  });
-  res.json({ success: true });
+router.get('/notifications/push-status', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const subscriptionCount = await AdminPushSubscription.countDocuments({ admin_id: req.user!._id });
+    res.json({
+      success: true,
+      configured: !!getVapidPublicKey(),
+      subscriptionCount,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/notifications/test', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    if (!getVapidPublicKey()) {
+      res.status(503).json({
+        success: false,
+        code: 'PUSH_NOT_CONFIGURED',
+        message: 'Background push is not configured. Add the three VAPID settings to the backend deployment.',
+      });
+      return;
+    }
+
+    const subscriptionCount = await AdminPushSubscription.countDocuments({ admin_id: req.user!._id });
+    if (!subscriptionCount) {
+      res.status(409).json({
+        success: false,
+        code: 'PUSH_NOT_SUBSCRIBED',
+        message: 'No device is subscribed yet. Install the app and enable background push on that device first.',
+      });
+      return;
+    }
+
+    const result = await dispatchAdminNotification({
+      id: `test-${Date.now()}-${req.user!._id}`,
+      type: 'message',
+      title: 'Test notification',
+      message: 'Background push is working on this device.',
+      url: '/sharp',
+      created_at: new Date().toISOString(),
+    }, String(req.user!._id));
+
+    res.json({
+      success: result.pushSent > 0,
+      ...result,
+      message: result.pushSent > 0
+        ? 'Test push delivered to your device.'
+        : 'The device subscription is expired or could not receive the test push. Enable push again on the device.',
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.get('/notifications', async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {

@@ -23,3 +23,9 @@ API configuration, open the installed admin app and select **Enable push** in
 the notification menu. The API's `CLIENT_URL` must allow the frontend origin,
 and reverse proxies must pass the `/socket.io` WebSocket path for live in-app
 notifications.
+
+On iPhone/iPad, install the site with Safari's **Add to Home Screen**, launch the
+installed app, then grant notification permission and enable background push.
+Run **Send test alert** from the notification menu and verify delivery after
+closing the app. The test reports if the backend keys or device subscription
+are missing.

@@ -22,7 +22,10 @@ export function configureAdminNotifications(server: Server): void {
   const publicKey = process.env.VAPID_PUBLIC_KEY;
   const privateKey = process.env.VAPID_PRIVATE_KEY;
   const subject = process.env.VAPID_SUBJECT;
-  if (!publicKey || !privateKey || !subject) return;
+  if (!publicKey || !privateKey || !subject) {
+    console.warn('Background admin push is disabled: configure VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, and VAPID_SUBJECT.');
+    return;
+  }
 
   webpush.setVapidDetails(subject, publicKey, privateKey);
   pushEnabled = true;
@@ -34,12 +37,15 @@ export function getVapidPublicKey(): string | null {
 }
 
 export function notifyAdmins(notification: AdminNotification): void {
-  void persistAndDispatch(notification).catch((error: unknown) => {
+  void dispatchAdminNotification(notification).catch((error: unknown) => {
     console.error('Failed to dispatch admin notification:', error);
   });
 }
 
-async function persistAndDispatch(notification: AdminNotification): Promise<void> {
+export async function dispatchAdminNotification(
+  notification: AdminNotification,
+  pushAdminId?: string
+): Promise<{ pushSent: number; pushFailed: number }> {
   try {
     await AdminNotificationRecord.updateOne(
       { event_id: notification.id },
@@ -61,17 +67,21 @@ async function persistAndDispatch(notification: AdminNotification): Promise<void
 
   io?.to('admins').emit('admin:notification', notification);
 
-  if (!pushEnabled) return;
-  await sendPushNotifications(notification);
+  if (!pushEnabled) return { pushSent: 0, pushFailed: 0 };
+  return sendPushNotifications(notification, pushAdminId);
 }
 
 /*
  * Background push is best-effort; saving the event and live sockets still
  * deliver the in-app notification if a device's push service is unavailable.
  */
-async function sendPushNotifications(notification: AdminNotification): Promise<void> {
-  const subscriptions = await AdminPushSubscription.find().lean();
-  await Promise.all(subscriptions.map(async (subscription) => {
+async function sendPushNotifications(
+  notification: AdminNotification,
+  adminId?: string
+): Promise<{ pushSent: number; pushFailed: number }> {
+  const query = adminId ? { admin_id: adminId } : {};
+  const subscriptions = await AdminPushSubscription.find(query).lean();
+  const results = await Promise.all(subscriptions.map(async (subscription) => {
     try {
       await webpush.sendNotification(
         {
@@ -88,6 +98,7 @@ async function sendPushNotifications(notification: AdminNotification): Promise<v
           created_at: notification.created_at,
         })
       );
+      return 'sent' as const;
     } catch (error) {
       const statusCode = (error as { statusCode?: number }).statusCode;
       if (statusCode === 404 || statusCode === 410) {
@@ -96,10 +107,15 @@ async function sendPushNotifications(notification: AdminNotification): Promise<v
         } catch (deleteError) {
           console.error('Failed to remove expired admin push subscription:', deleteError);
         }
-        return;
+        return 'failed' as const;
       }
 
       console.error('Failed to deliver an admin push notification:', error);
+      return 'failed' as const;
     }
   }));
+  return {
+    pushSent: results.filter((result) => result === 'sent').length,
+    pushFailed: results.filter((result) => result === 'failed').length,
+  };
 }
